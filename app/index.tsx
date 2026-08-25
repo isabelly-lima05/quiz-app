@@ -1,35 +1,51 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  Animated,
+  Easing,
   FlatList,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Audio } from "expo-av";
 
-// Ícones da Lucide Icons
+// Ícones Lucide
 import {
-  BookOpen,
-  Calculator,
-  Landmark,
-  Globe,
-  Zap,
-  FlaskConical,
-  Dna,
-  Languages,
-  Brain, 
-  Users,
-  Sparkles,
-  Gamepad2,
-  Film,
-  Library,
-  Sun,
-  Moon,
-  LogOut,
-  RotateCcw,
+  AlertTriangle,
   ArrowRight,
+  BookOpen,
+  Brain,
+  Calculator,
+  CheckCircle2,
+  Clock,
+  Dna,
+  Film,
+  Flame,
+  FlaskConical,
+  Gamepad2,
+  Globe,
+  Heart,
+  HelpCircle,
+  Landmark,
+  Languages,
+  Library,
+  LogOut,
+  Medal,
+  Moon,
+  RotateCcw,
+  ShieldAlert,
+  Sparkles,
+  Sun,
+  Trash2,
   Trophy,
+  User,
+  Users,
+  XCircle,
+  Zap,
 } from "lucide-react-native";
 
 import allQuestionsData from "../questions.json";
@@ -42,10 +58,41 @@ export type Question = {
   correctAnswer: string;
 };
 
+export type RankingItem = {
+  id: string;
+  playerName: string;
+  score: number;
+  total: number;
+  category: string;
+  date: string;
+};
+
+type CustomAlertState = {
+  visible: boolean;
+  title: string;
+  message: string;
+  type: "success" | "warning" | "error" | "confirm";
+  onConfirm?: () => void;
+};
+
 const OPTION_LETTERS = ["A", "B", "C", "D"];
 const QUESTIONS_PER_GAME = 10;
+const INITIAL_LIVES = 3;
 
-// Lista de Categorias com componentes do Lucide
+// ⏱️ Tempo por dificuldade
+const getQuestionTimeLimit = (level: string) => {
+  switch (level?.toLowerCase()) {
+    case "fácil":
+      return 20;
+    case "médio":
+      return 15;
+    case "difícil":
+      return 10;
+    default:
+      return 15;
+  }
+};
+
 const CATEGORIES = [
   { id: "Português", name: "Português", tag: "Gramática & Texto", color: "#EC4899", Icon: BookOpen },
   { id: "Matemática", name: "Matemática", tag: "Lógica & Cálculos", color: "#3B82F6", Icon: Calculator },
@@ -66,6 +113,7 @@ const CATEGORIES = [
 export default function HomePage() {
   const [isDarkMode, setIsDarkMode] = useState(true);
 
+  // Estados do Quiz
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -75,9 +123,37 @@ export default function HomePage() {
   const [score, setScore] = useState(0);
   const [showResult, setShowResult] = useState(false);
 
+  // Vidas & Cronômetro
+  const [lives, setLives] = useState(INITIAL_LIVES);
+  const [timeLeft, setTimeLeft] = useState(15);
+  const [isGameOver, setIsGameOver] = useState(false);
+
+  // Ranking & Nome
+  const [playerName, setPlayerName] = useState("");
+  const [rankingList, setRankingList] = useState<RankingItem[]>([]);
+  const [hasSavedScore, setHasSavedScore] = useState(false);
+  const [isInputFocused, setIsInputFocused] = useState(false);
+
+  // Desafio da Última Chance
+  const [showReviveModal, setShowReviveModal] = useState(false);
+  const [reviveQuestion, setReviveQuestion] = useState<Question | null>(null);
+  const [hasUsedRevive, setHasUsedRevive] = useState(false);
+
+  // Modal de Alerta
+  const [alertState, setAlertState] = useState<CustomAlertState>({
+    visible: false,
+    title: "",
+    message: "",
+    type: "warning",
+  });
+
   const [playedQuestionTexts, setPlayedQuestionTexts] = useState<string[]>([]);
 
-  // TEMA DINÂMICO
+  // Animações
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+  const shakeAnim = useRef(new Animated.Value(0)).current;
+
+  // Tema Dinâmico
   const theme = {
     bg: isDarkMode ? "#030712" : "#F8FAFC",
     glowTop: isDarkMode ? "rgba(99,102,241,0.15)" : "rgba(99,102,241,0.08)",
@@ -86,7 +162,7 @@ export default function HomePage() {
     cardBorder: isDarkMode ? "rgba(255,255,255,0.08)" : "#E2E8F0",
     textPrimary: isDarkMode ? "#F9FAFB" : "#0F172A",
     textSecondary: isDarkMode ? "#9CA3AF" : "#64748B",
-    iconColorLight: "#0F172A", // Escuro para o modo claro
+    iconColorLight: "#0F172A",
     iconCircleBg: isDarkMode ? "rgba(255, 255, 255, 0.06)" : "rgba(15, 23, 42, 0.05)",
     optionBg: isDarkMode ? "#111827" : "#FFFFFF",
     optionBorder: isDarkMode ? "rgba(255,255,255,0.08)" : "#E2E8F0",
@@ -95,9 +171,226 @@ export default function HomePage() {
     headerBtnBg: isDarkMode ? "rgba(255,255,255,0.08)" : "rgba(15,23,42,0.06)",
     headerBtnText: isDarkMode ? "#E5E7EB" : "#1E293B",
     modalBg: isDarkMode ? "#111827" : "#FFFFFF",
-    modalOverlay: isDarkMode ? "rgba(3, 7, 18, 0.85)" : "rgba(15, 23, 42, 0.6)",
+    modalOverlay: isDarkMode ? "rgba(3, 7, 18, 0.85)" : "rgba(15, 23, 42, 0.65)",
+    inputBg: isDarkMode ? "rgba(255, 255, 255, 0.05)" : "#F1F5F9",
   };
 
+  // -------------------------------------------------------------
+  // 🔊 SISTEMA DE EFEITOS SONOROS LEVES E RÁPIDOS
+  // -------------------------------------------------------------
+  useEffect(() => {
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+  }, []);
+
+  const playSound = async (type: "correct" | "wrong" | "victory" | "gameover" | "challenge") => {
+    try {
+      const soundSources = {
+        correct: "https://assets.mixkit.co/active_storage/sfx/2000/2000-preview.mp3", // Acerto Rápido
+        wrong: "https://assets.mixkit.co/active_storage/sfx/2003/2003-preview.mp3",   // Erro Rápido
+        challenge: "https://assets.mixkit.co/active_storage/sfx/2568/2568-preview.mp3",// Suspense / Alerta
+        victory: "https://assets.mixkit.co/active_storage/sfx/1435/1435-preview.mp3",  // Animada (>= 7 Acertos)
+        gameover: "https://assets.mixkit.co/active_storage/sfx/2573/2573-preview.mp3", // Triste (< 7 ou Game Over)
+      };
+
+      const uri = soundSources[type];
+      if (!uri) return;
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri },
+        { shouldPlay: true, volume: 1.0 }
+      );
+
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          sound.unloadAsync().catch(() => {});
+        }
+      });
+    } catch (e) {
+      console.log("Erro no som:", e);
+    }
+  };
+
+  // Alerta Bonito
+  const showAlert = (
+    title: string,
+    message: string,
+    type: "success" | "warning" | "error" | "confirm" = "warning",
+    onConfirm?: () => void
+  ) => {
+    setAlertState({
+      visible: true,
+      title,
+      message,
+      type,
+      onConfirm,
+    });
+  };
+
+  const closeAlert = () => {
+    setAlertState((prev) => ({ ...prev, visible: false }));
+  };
+
+  // -------------------------------------------------------------
+  // 🏆 RANKING
+  // -------------------------------------------------------------
+  useEffect(() => {
+    loadRanking();
+  }, []);
+
+  const loadRanking = async () => {
+    try {
+      const stored = await AsyncStorage.getItem("@quiz_global_ranking");
+      if (stored) {
+        setRankingList(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.log("Erro ao carregar ranking", e);
+    }
+  };
+
+  const saveScoreToRanking = async () => {
+    if (!playerName.trim()) {
+      showAlert("Nome Obrigatório", "Por favor, digite seu nome para registrar sua pontuação no Ranking!", "warning");
+      return;
+    }
+
+    const newItem: RankingItem = {
+      id: Date.now().toString(),
+      playerName: playerName.trim(),
+      score: score,
+      total: questions.length,
+      category: selectedCategory || "Geral",
+      date: new Date().toLocaleDateString("pt-BR"),
+    };
+
+    const updated = [...rankingList, newItem].sort((a, b) => b.score - a.score);
+
+    try {
+      await AsyncStorage.setItem("@quiz_global_ranking", JSON.stringify(updated));
+      setRankingList(updated);
+      setHasSavedScore(true);
+      playSound("correct");
+      showAlert("Salvo com Sucesso! 🎉", `${playerName.trim()}, sua nota foi gravada no Ranking!`, "success");
+    } catch (e) {
+      showAlert("Erro", "Não foi possível salvar o placar. Tente novamente.", "error");
+    }
+  };
+
+  const handleClearRanking = () => {
+    showAlert(
+      "Apagar Ranking",
+      "Tem certeza que deseja apagar todo o histórico de pontuações?",
+      "confirm",
+      async () => {
+        try {
+          await AsyncStorage.removeItem("@quiz_global_ranking");
+          setRankingList([]);
+          showAlert("Limpo!", "O histórico de pontuações foi zerado.", "success");
+        } catch (e) {
+          console.log("Erro ao limpar", e);
+        }
+      }
+    );
+  };
+
+  // Animações
+  const triggerFadeIn = () => {
+    fadeAnim.setValue(0);
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 300,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const triggerShake = () => {
+    shakeAnim.setValue(0);
+    Animated.sequence([
+      Animated.timing(shakeAnim, { toValue: 10, duration: 40, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -10, duration: 40, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 8, duration: 40, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -8, duration: 40, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 0, duration: 40, useNativeDriver: true }),
+    ]).start();
+  };
+
+  // 🔥 Lógica de Vidas e Desafio (Som de Suspense)
+  const triggerLifeLoss = () => {
+    setLives((prevLives) => {
+      const newLives = prevLives - 1;
+
+      if (newLives <= 0) {
+        if (!hasUsedRevive) {
+          triggerReviveChallenge();
+        } else {
+          setIsGameOver(true);
+          setShowResult(true);
+          playSound("gameover"); // Som Triste no final
+        }
+      }
+      return newLives;
+    });
+  };
+
+  const triggerReviveChallenge = () => {
+    const hardQuestions = (allQuestionsData as Question[]).filter(
+      (q) => q.level.toLowerCase() === "difícil"
+    );
+    const randomHard =
+      hardQuestions[Math.floor(Math.random() * hardQuestions.length)];
+
+    setReviveQuestion(randomHard);
+    setHasUsedRevive(true);
+    setShowReviveModal(true);
+    playSound("challenge"); // ⚡ Som de Suspense para o Desafio
+  };
+
+  const handleReviveAnswer = (option: string) => {
+    if (option === reviveQuestion?.correctAnswer) {
+      playSound("correct");
+      setLives(1);
+      setShowReviveModal(false);
+      showAlert("🔥 DESAFIO CONCLUÍDO!", "Você acertou a pergunta difícil e ganhou +1 Vida extra!", "success");
+      if (questions[currentIndex]) {
+        setTimeLeft(getQuestionTimeLimit(questions[currentIndex].level));
+      }
+    } else {
+      playSound("gameover"); // Som Triste
+      setShowReviveModal(false);
+      setIsGameOver(true);
+      setShowResult(true);
+      showAlert("Fim de Jogo! ❌", "Você errou a pergunta desafio da última chance.", "error");
+    }
+  };
+
+  // ⏰ Cronômetro
+  const handleTimeout = () => {
+    setHasAnswered(true);
+    playSound("wrong");
+    triggerShake();
+    triggerLifeLoss();
+  };
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+
+    if (started && !hasAnswered && !showResult && !isGameOver && !showReviveModal) {
+      if (timeLeft > 0) {
+        timer = setTimeout(() => {
+          setTimeLeft((prev) => prev - 1);
+        }, 1000);
+      } else {
+        handleTimeout();
+      }
+    }
+
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [started, hasAnswered, showResult, isGameOver, showReviveModal, timeLeft]);
+
+  // Navegação
   const loadCategoryQuestions = (categoryName: string) => {
     const categoryQuestions = (allQuestionsData as Question[]).filter(
       (q) => q.category.toLowerCase() === categoryName.toLowerCase()
@@ -121,6 +414,10 @@ export default function HomePage() {
     ]);
 
     setQuestions(selected);
+
+    if (selected.length > 0) {
+      setTimeLeft(getQuestionTimeLimit(selected[0].level));
+    }
   };
 
   const handleStartCategory = (categoryName: string) => {
@@ -130,8 +427,14 @@ export default function HomePage() {
     setSelectedOption(null);
     setHasAnswered(false);
     setScore(0);
+    setLives(INITIAL_LIVES);
     setShowResult(false);
+    setIsGameOver(false);
+    setHasUsedRevive(false);
+    setHasSavedScore(false);
+    setPlayerName("");
     setStarted(true);
+    triggerFadeIn();
   };
 
   const handleRestartSameCategory = () => {
@@ -145,6 +448,43 @@ export default function HomePage() {
     setStarted(false);
     setSelectedCategory(null);
     setQuestions([]);
+  };
+
+  const handleSelectOption = (option: string) => {
+    if (hasAnswered || showResult || isGameOver || showReviveModal) return;
+
+    setSelectedOption(option);
+    setHasAnswered(true);
+
+    if (option === currentQuestion.correctAnswer) {
+      setScore((prev) => prev + 1);
+      playSound("correct");
+    } else {
+      playSound("wrong");
+      triggerShake();
+      triggerLifeLoss();
+    }
+  };
+
+  const handleNext = () => {
+    if (!hasAnswered) return;
+
+    if (currentIndex < questions.length - 1 && lives > 0) {
+      const nextIndex = currentIndex + 1;
+      setCurrentIndex(nextIndex);
+      setSelectedOption(null);
+      setHasAnswered(false);
+      setTimeLeft(getQuestionTimeLimit(questions[nextIndex].level));
+      triggerFadeIn();
+    } else {
+      // TELA FINAL: Toca som de acordo com o resultado final
+      setShowResult(true);
+      if (score >= 7 && lives > 0) {
+        playSound("victory"); // 🎉 Música animada para 7+ acertos
+      } else {
+        playSound("gameover"); // 💔 Música triste para menos de 7 ou Game Over
+      }
+    }
   };
 
   const currentQuestion = questions[currentIndex];
@@ -167,73 +507,54 @@ export default function HomePage() {
     }
   };
 
-  const handleSelectOption = (option: string) => {
-    if (hasAnswered || showResult) return;
-
-    setSelectedOption(option);
-    setHasAnswered(true);
-
-    if (option === currentQuestion.correctAnswer) {
-      setScore((prev) => prev + 1);
-    }
-  };
-
-  const handleNext = () => {
-    if (!hasAnswered) return;
-
-    if (currentIndex < questions.length - 1) {
-      setCurrentIndex(currentIndex + 1);
-      setSelectedOption(null);
-      setHasAnswered(false);
-    } else {
-      setShowResult(true);
-    }
-  };
-
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
       <View style={[styles.glowTop, { backgroundColor: theme.glowTop }]} />
       <View style={[styles.glowBottom, { backgroundColor: theme.glowBottom }]} />
 
-      {/* 🟢 TELA INICIAL: SELEÇÃO DE MATÉRIAS */}
+      {/* 🟢 TELA INICIAL */}
       {!started ? (
         <View style={styles.welcomeContainer}>
-          <View style={styles.appHeaderRow}>
-            <View>
-              <Text style={styles.brandBadge}>✨ MASTER QUIZ</Text>
-              <Text style={[styles.welcomeTitle, { color: theme.textPrimary }]}>
-                Escolha a Matéria
-              </Text>
-            </View>
-
-            {/* BOTÃO MUDAR TEMA */}
-            <TouchableOpacity
-              style={[styles.themeToggleBtn, { backgroundColor: theme.headerBtnBg }]}
-              onPress={() => setIsDarkMode(!isDarkMode)}
-              activeOpacity={0.8}
-            >
-              {isDarkMode ? (
-                <Sun color="#FBBF24" size={20} />
-              ) : (
-                <Moon color="#0F172A" size={20} />
-              )}
-            </TouchableOpacity>
-          </View>
-
-          <Text style={[styles.welcomeText, { color: theme.textSecondary }]}>
-            Selecione uma categoria para responder 10 perguntas dinâmicas.
-          </Text>
-
           <FlatList
             data={CATEGORIES}
             keyExtractor={(item) => item.id}
             numColumns={2}
             showsVerticalScrollIndicator={false}
             columnWrapperStyle={styles.categoryRow}
-            contentContainerStyle={{ paddingBottom: 30, paddingTop: 10 }}
+            contentContainerStyle={{ paddingBottom: 40 }}
+            ListHeaderComponent={
+              <View>
+                <View style={styles.appHeaderRow}>
+                  <View>
+                    <View style={styles.brandRow}>
+                      <Sparkles color="#6366F1" size={16} />
+                      <Text style={styles.brandBadge}>MASTER QUIZ PRO</Text>
+                    </View>
+                    <Text style={[styles.welcomeTitle, { color: theme.textPrimary }]}>
+                      Escolha a Matéria
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={[styles.themeToggleBtn, { backgroundColor: theme.headerBtnBg }]}
+                    onPress={() => setIsDarkMode(!isDarkMode)}
+                    activeOpacity={0.8}
+                  >
+                    {isDarkMode ? (
+                      <Sun color="#FBBF24" size={20} />
+                    ) : (
+                      <Moon color="#0F172A" size={20} />
+                    )}
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={[styles.welcomeText, { color: theme.textSecondary }]}>
+                  Selecione uma matéria, responda antes do tempo acabar e dispute o topo do Ranking!
+                </Text>
+              </View>
+            }
             renderItem={({ item }) => {
               const IconComponent = item.Icon;
-              // Cor do ícone: Mais escura no modo claro, mais clara/viva no modo escuro
               const iconColor = isDarkMode ? item.color : theme.iconColorLight;
 
               return (
@@ -266,18 +587,89 @@ export default function HomePage() {
                 </TouchableOpacity>
               );
             }}
+            ListFooterComponent={
+              /* 🏆 SEÇÃO DE RANKING */
+              <View style={styles.rankingSection}>
+                <View style={styles.rankingHeaderRow}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Trophy color="#F59E0B" size={22} />
+                    <Text style={[styles.rankingTitle, { color: theme.textPrimary }]}>
+                      Ranking dos Jogadores
+                    </Text>
+                  </View>
+
+                  {rankingList.length > 0 && (
+                    <TouchableOpacity
+                      style={styles.clearRankingBtn}
+                      onPress={handleClearRanking}
+                      activeOpacity={0.7}
+                    >
+                      <Trash2 color="#EF4444" size={15} />
+                      <Text style={styles.clearRankingText}>Limpar</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {rankingList.length === 0 ? (
+                  <View
+                    style={[
+                      styles.emptyRankingCard,
+                      { backgroundColor: theme.cardBg, borderColor: theme.cardBorder },
+                    ]}
+                  >
+                    <Medal color={theme.textSecondary} size={28} style={{ marginBottom: 6 }} />
+                    <Text style={[styles.emptyRankingText, { color: theme.textSecondary }]}>
+                      Nenhuma pontuação salva ainda. Seja o primeiro a entrar no ranking!
+                    </Text>
+                  </View>
+                ) : (
+                  rankingList.slice(0, 5).map((item, index) => (
+                    <View
+                      key={item.id}
+                      style={[
+                        styles.rankingCardItem,
+                        { backgroundColor: theme.cardBg, borderColor: theme.cardBorder },
+                      ]}
+                    >
+                      <View style={styles.rankingPosCircle}>
+                        <Text style={styles.rankingPosText}>#{index + 1}</Text>
+                      </View>
+
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.rankingPlayerName, { color: theme.textPrimary }]}>
+                          {item.playerName}
+                        </Text>
+
+                        <Text style={[styles.rankingCategory, { color: theme.textSecondary }]}>
+                          {item.category} • {item.date}
+                        </Text>
+                      </View>
+
+                      <Text style={styles.rankingScoreText}>
+                        {item.score}/{item.total} pts
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
+            }
           />
         </View>
       ) : (
-        /* 🔵 TELA DE QUIZ (PERGUNTAS) */
+        /* 🔵 TELA DE QUIZ */
         <ScrollView
           style={styles.container}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
           {currentQuestion && (
-            <>
-              {/* HEADER COM BOTÕES DE AÇÃO COM ÍCONES LUCIDE */}
+            <Animated.View
+              style={{
+                opacity: fadeAnim,
+                transform: [{ translateX: shakeAnim }],
+              }}
+            >
+              {/* HEADER DO QUIZ */}
               <View style={styles.quizHeader}>
                 <TouchableOpacity
                   style={[styles.iconButton, { backgroundColor: theme.headerBtnBg }]}
@@ -289,27 +681,42 @@ export default function HomePage() {
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={[styles.iconButton, { backgroundColor: theme.headerBtnBg }]}
-                  onPress={() => setIsDarkMode(!isDarkMode)}
-                >
-                  {isDarkMode ? (
-                    <Sun color="#FBBF24" size={18} />
-                  ) : (
-                    <Moon color="#0F172A" size={18} />
-                  )}
-                </TouchableOpacity>
+                {/* VIDAS */}
+                <View style={styles.livesContainer}>
+                  {[1, 2, 3].map((heartIndex) => (
+                    <Heart
+                      key={heartIndex}
+                      size={20}
+                      color={heartIndex <= lives ? "#EF4444" : "#4B5563"}
+                      fill={heartIndex <= lives ? "#EF4444" : "transparent"}
+                    />
+                  ))}
+                </View>
 
-                <TouchableOpacity
-                  style={styles.iconButtonAction}
-                  onPress={handleRestartSameCategory}
+                {/* CRONÔMETRO */}
+                <View
+                  style={[
+                    styles.timerBadge,
+                    {
+                      backgroundColor:
+                        timeLeft <= 5 ? "rgba(239,68,68,0.2)" : "rgba(99,102,241,0.15)",
+                      borderColor: timeLeft <= 5 ? "#EF4444" : "#6366F1",
+                    },
+                  ]}
                 >
-                  <RotateCcw color="#6366F1" size={18} />
-                  <Text style={styles.iconButtonActionText}>Novas</Text>
-                </TouchableOpacity>
+                  <Clock size={16} color={timeLeft <= 5 ? "#EF4444" : "#6366F1"} />
+                  <Text
+                    style={[
+                      styles.timerText,
+                      { color: timeLeft <= 5 ? "#EF4444" : "#6366F1" },
+                    ]}
+                  >
+                    {timeLeft}s
+                  </Text>
+                </View>
               </View>
 
-              {/* BARRA DE PROGRESSO */}
+              {/* PROGRESSO */}
               <View style={[styles.progressBarBackground, { backgroundColor: theme.cardBorder }]}>
                 <View
                   style={[
@@ -319,7 +726,7 @@ export default function HomePage() {
                 />
               </View>
 
-              {/* CARTÃO DA PERGUNTA */}
+              {/* PERGUNTA */}
               <View
                 style={[
                   styles.questionCard,
@@ -346,7 +753,8 @@ export default function HomePage() {
                         { color: getLevelBadgeStyle(currentQuestion.level).text },
                       ]}
                     >
-                      {currentQuestion.level.toUpperCase()}
+                      {currentQuestion.level.toUpperCase()} (
+                      {getQuestionTimeLimit(currentQuestion.level)}s)
                     </Text>
                   </View>
                 </View>
@@ -356,7 +764,7 @@ export default function HomePage() {
                 </Text>
               </View>
 
-              {/* LISTA DE ALTERNATIVAS */}
+              {/* ALTERNATIVAS */}
               <View style={styles.optionsContainer}>
                 {currentQuestion.options.map((option, index) => {
                   const isSelected = selectedOption === option;
@@ -400,9 +808,7 @@ export default function HomePage() {
                       activeOpacity={0.75}
                     >
                       <View style={letterBadgeStyle}>
-                        <Text style={letterTextStyle}>
-                          {OPTION_LETTERS[index]}
-                        </Text>
+                        <Text style={letterTextStyle}>{OPTION_LETTERS[index]}</Text>
                       </View>
                       <Text style={[styles.optionText, { color: theme.textPrimary }]}>
                         {option}
@@ -412,7 +818,7 @@ export default function HomePage() {
                 })}
               </View>
 
-              {/* FEEDBACK DE ACERTO/ERRO */}
+              {/* FEEDBACK */}
               {hasAnswered && (
                 <View
                   style={[
@@ -422,6 +828,11 @@ export default function HomePage() {
                       : styles.feedbackWrongBox,
                   ]}
                 >
+                  {isCorrectAnswer ? (
+                    <CheckCircle2 color="#16A34A" size={20} />
+                  ) : (
+                    <XCircle color="#DC2626" size={20} />
+                  )}
                   <Text
                     style={[
                       styles.feedbackText,
@@ -431,13 +842,15 @@ export default function HomePage() {
                     ]}
                   >
                     {isCorrectAnswer
-                      ? "✨ Resposta Exata! Parabéns!"
-                      : `❌ Incorreto! A resposta certa é: ${currentQuestion.correctAnswer}`}
+                      ? "Resposta Exata! Parabéns!"
+                      : timeLeft === 0
+                      ? "O tempo acabou!"
+                      : `Incorreto! A resposta certa é: ${currentQuestion.correctAnswer}`}
                   </Text>
                 </View>
               )}
 
-              {/* BOTÃO PRÓXIMA / FINALIZAR */}
+              {/* BOTÃO PRÓXIMA */}
               <View style={styles.buttonRow}>
                 <TouchableOpacity
                   style={[
@@ -448,24 +861,69 @@ export default function HomePage() {
                   disabled={!hasAnswered}
                 >
                   <Text style={styles.primaryButtonText}>
-                    {currentIndex === questions.length - 1
+                    {currentIndex === questions.length - 1 || lives <= 0
                       ? "Ver Placar Final"
                       : "Próxima Pergunta"}
                   </Text>
-                  {currentIndex === questions.length - 1 ? (
-                    <Trophy color="#FFFFFF" size={20} style={{ marginLeft: 8 }} />
-                  ) : (
-                    <ArrowRight color="#FFFFFF" size={20} style={{ marginLeft: 8 }} />
-                  )}
+                  <ArrowRight color="#FFFFFF" size={20} style={{ marginLeft: 8 }} />
                 </TouchableOpacity>
               </View>
-            </>
+            </Animated.View>
           )}
         </ScrollView>
       )}
 
+      {/* 🔴 MODAL DESAFIO ÚLTIMA CHANCE (SOM DE SUSPENSE) */}
+      {showReviveModal && reviveQuestion && (
+        <View style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay }]}>
+          <View
+            style={[
+              styles.modalCard,
+              { backgroundColor: theme.modalBg, borderColor: "#EF4444" },
+            ]}
+          >
+            <View style={styles.reviveHeader}>
+              <Flame color="#EF4444" size={26} />
+              <Text style={styles.reviveTitle}>ÚLTIMA CHANCE</Text>
+            </View>
+
+            <Text style={[styles.reviveSubtitle, { color: theme.textSecondary }]}>
+              Suas vidas acabaram! Acerte este desafio DIFÍCIL para ganhar +1 Vida e continuar!
+            </Text>
+
+            <View
+              style={[
+                styles.questionCard,
+                { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, marginVertical: 14 },
+              ]}
+            >
+              <Text style={[styles.questionText, { color: theme.textPrimary, fontSize: 16 }]}>
+                {reviveQuestion.question}
+              </Text>
+            </View>
+
+            <View style={{ width: "100%", gap: 8 }}>
+              {reviveQuestion.options.map((option, idx) => (
+                <TouchableOpacity
+                  key={option}
+                  style={[
+                    styles.option,
+                    { backgroundColor: theme.optionBg, borderColor: theme.optionBorder },
+                  ]}
+                  onPress={() => handleReviveAnswer(option)}
+                >
+                  <Text style={[styles.optionText, { color: theme.textPrimary }]}>
+                    {OPTION_LETTERS[idx]}) {option}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+      )}
+
       {/* 🔴 MODAL DE RESULTADO FINAL */}
-      {showResult && (
+      {showResult && !showReviveModal && (
         <View style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay }]}>
           <View
             style={[
@@ -473,7 +931,17 @@ export default function HomePage() {
               { backgroundColor: theme.modalBg, borderColor: theme.cardBorder },
             ]}
           >
-            <Text style={styles.modalBadge}>FIM DA RODADA</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              {isGameOver || score < 7 ? (
+                <ShieldAlert color="#EF4444" size={20} />
+              ) : (
+                <Trophy color="#6366F1" size={20} />
+              )}
+              <Text style={[styles.modalBadge, (isGameOver || score < 7) && { color: "#EF4444" }]}>
+                {isGameOver ? "GAME OVER" : score >= 7 ? "MUITO BEM!" : "FIM DA RODADA"}
+              </Text>
+            </View>
+
             <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
               {selectedCategory}
             </Text>
@@ -485,18 +953,66 @@ export default function HomePage() {
               <Text style={styles.modalScoreTotal}>/ {questions.length}</Text>
             </View>
 
-            <Text style={[styles.modalDescription, { color: theme.textSecondary }]}>
-              {score >= 7
-                ? "🎯 Excelente desempenho! Você domina esta matéria!"
-                : "📚 Bom treino! Continue praticando para melhorar sua nota!"}
-            </Text>
+            {/* CARD DE SALVAR O NOME */}
+            {!hasSavedScore ? (
+              <View
+                style={[
+                  styles.saveNameCard,
+                  { backgroundColor: theme.cardBg, borderColor: isInputFocused ? "#6366F1" : theme.cardBorder },
+                ]}
+              >
+                <View style={styles.saveNameHeader}>
+                  <User color="#6366F1" size={18} />
+                  <Text style={[styles.saveNameTitle, { color: theme.textPrimary }]}>
+                    Registrar no Ranking
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.inputWrapper,
+                    {
+                      backgroundColor: theme.inputBg,
+                      borderColor: isInputFocused ? "#6366F1" : "transparent",
+                    },
+                  ]}
+                >
+                  <TextInput
+                    style={[styles.textInput, { color: theme.textPrimary }]}
+                    placeholder="Digite seu Nome ou Apelido..."
+                    placeholderTextColor="#9CA3AF"
+                    value={playerName}
+                    onChangeText={setPlayerName}
+                    onFocus={() => setIsInputFocused(true)}
+                    onBlur={() => setIsInputFocused(false)}
+                    maxLength={16}
+                  />
+                </View>
+
+                <TouchableOpacity
+                  style={styles.saveScoreButton}
+                  onPress={saveScoreToRanking}
+                  activeOpacity={0.8}
+                >
+                  <Trophy color="#FFFFFF" size={16} style={{ marginRight: 6 }} />
+                  <Text style={styles.saveScoreButtonText}>Salvar Pontuação</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.savedScoreBadge}>
+                <CheckCircle2 color="#10B981" size={18} />
+                <Text style={styles.savedScoreText}>
+                  Pontuação Registrada para {playerName}!
+                </Text>
+              </View>
+            )}
 
             <TouchableOpacity
               style={styles.modalButton}
               onPress={handleRestartSameCategory}
             >
               <RotateCcw color="#FFFFFF" size={18} style={{ marginRight: 8 }} />
-              <Text style={styles.modalButtonText}>Novas Perguntas</Text>
+              <Text style={styles.modalButtonText}>Jogar Novamente</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -511,6 +1027,60 @@ export default function HomePage() {
                 Escolher outra Matéria
               </Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* 🔴 MODAL DE ALERTA CUSTOMIZADO */}
+      {alertState.visible && (
+        <View style={[styles.modalOverlay, { backgroundColor: theme.modalOverlay, zIndex: 999 }]}>
+          <View
+            style={[
+              styles.modalCard,
+              { backgroundColor: theme.modalBg, borderColor: theme.cardBorder, maxWidth: 340 },
+            ]}
+          >
+            <View style={{ marginBottom: 12 }}>
+              {alertState.type === "success" && <CheckCircle2 color="#10B981" size={42} />}
+              {alertState.type === "warning" && <AlertTriangle color="#F59E0B" size={42} />}
+              {alertState.type === "error" && <XCircle color="#EF4444" size={42} />}
+              {alertState.type === "confirm" && <HelpCircle color="#6366F1" size={42} />}
+            </View>
+
+            <Text style={[styles.modalTitle, { color: theme.textPrimary, fontSize: 18, marginBottom: 6 }]}>
+              {alertState.title}
+            </Text>
+
+            <Text style={[styles.modalDescription, { color: theme.textSecondary, marginBottom: 20 }]}>
+              {alertState.message}
+            </Text>
+
+            <View style={{ width: "100%", gap: 8 }}>
+              {alertState.type === "confirm" ? (
+                <>
+                  <TouchableOpacity
+                    style={[styles.modalButton, { backgroundColor: "#EF4444" }]}
+                    onPress={() => {
+                      closeAlert();
+                      if (alertState.onConfirm) alertState.onConfirm();
+                    }}
+                  >
+                    <Text style={styles.modalButtonText}>Sim, Confirmar</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.modalSecondaryButton, { backgroundColor: theme.headerBtnBg, borderColor: theme.cardBorder }]}
+                    onPress={closeAlert}
+                  >
+                    <Text style={[styles.modalSecondaryButtonText, { color: theme.textPrimary }]}>Cancelar</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <TouchableOpacity style={styles.modalButton} onPress={closeAlert}>
+                  <Text style={styles.modalButtonText}>Entendido</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
         </View>
       )}
@@ -557,12 +1127,17 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     marginBottom: 6,
   },
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 4,
+  },
   brandBadge: {
     color: "#6366F1",
     fontSize: 12,
     fontWeight: "800",
     letterSpacing: 1.5,
-    marginBottom: 4,
   },
   welcomeTitle: {
     fontSize: 28,
@@ -589,11 +1164,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderWidth: 1.5,
     alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
   },
   iconCircle: {
     width: 56,
@@ -614,6 +1184,85 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     textAlign: "center",
   },
+
+  // 🏆 RANKING STYLES
+  rankingSection: {
+    marginTop: 20,
+    marginBottom: 20,
+  },
+  rankingHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+  rankingTitle: {
+    fontSize: 20,
+    fontWeight: "900",
+  },
+  clearRankingBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(239,68,68,0.15)",
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
+  clearRankingText: {
+    color: "#EF4444",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  emptyRankingCard: {
+    padding: 20,
+    borderRadius: 20,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyRankingText: {
+    fontSize: 13,
+    textAlign: "center",
+    lineHeight: 18,
+  },
+  rankingCardItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    marginBottom: 10,
+    gap: 12,
+  },
+  rankingPosCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: "rgba(99,102,241,0.18)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  rankingPosText: {
+    color: "#6366F1",
+    fontWeight: "900",
+    fontSize: 13,
+  },
+  rankingPlayerName: {
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  rankingCategory: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  rankingScoreText: {
+    color: "#10B981",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  // QUIZ SCREEN STYLES
   quizHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -632,21 +1281,23 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontSize: 13,
   },
-  iconButtonAction: {
+  livesContainer: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "rgba(99,102,241,0.15)",
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#6366F1",
     gap: 6,
   },
-  iconButtonActionText: {
-    color: "#6366F1",
-    fontWeight: "800",
-    fontSize: 13,
+  timerBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  timerText: {
+    fontWeight: "900",
+    fontSize: 14,
   },
   progressBarBackground: {
     height: 8,
@@ -741,6 +1392,10 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   feedbackBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
     padding: 14,
     borderRadius: 16,
     marginBottom: 16,
@@ -782,6 +1437,8 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     fontSize: 15,
   },
+
+  // MODAL STYLES
   modalOverlay: {
     position: "absolute",
     top: 0,
@@ -802,34 +1459,33 @@ const styles = StyleSheet.create({
   },
   modalBadge: {
     color: "#6366F1",
-    fontSize: 11,
-    fontWeight: "800",
+    fontSize: 12,
+    fontWeight: "900",
     letterSpacing: 1.5,
-    marginBottom: 4,
   },
   modalTitle: {
     fontSize: 22,
     fontWeight: "900",
-    marginBottom: 16,
+    marginBottom: 12,
   },
   scoreCircle: {
     flexDirection: "row",
     alignItems: "baseline",
     backgroundColor: "rgba(99,102,241,0.12)",
-    paddingVertical: 12,
-    paddingHorizontal: 28,
+    paddingVertical: 10,
+    paddingHorizontal: 26,
     borderRadius: 99,
     marginBottom: 16,
     borderWidth: 1,
     borderColor: "#6366F1",
   },
   modalScore: {
-    fontSize: 44,
+    fontSize: 40,
     fontWeight: "900",
   },
   modalScoreTotal: {
     color: "#6366F1",
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "800",
     marginLeft: 4,
   },
@@ -837,7 +1493,65 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     textAlign: "center",
-    marginBottom: 20,
+  },
+
+  // CARD DE REGISTRAR O NOME
+  saveNameCard: {
+    width: "100%",
+    borderRadius: 20,
+    padding: 16,
+    borderWidth: 1.5,
+    marginBottom: 16,
+  },
+  saveNameHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 10,
+  },
+  saveNameTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  inputWrapper: {
+    borderRadius: 14,
+    borderWidth: 1.5,
+    marginBottom: 12,
+    overflow: "hidden",
+  },
+  textInput: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  saveScoreButton: {
+    backgroundColor: "#10B981",
+    paddingVertical: 13,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  saveScoreButtonText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  savedScoreBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "rgba(16,185,129,0.15)",
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 99,
+    marginBottom: 16,
+  },
+  savedScoreText: {
+    color: "#10B981",
+    fontWeight: "800",
+    fontSize: 13,
   },
   modalButton: {
     width: "100%",
@@ -866,5 +1580,24 @@ const styles = StyleSheet.create({
   modalSecondaryButtonText: {
     fontSize: 14,
     fontWeight: "700",
+  },
+
+  // STYLES DA ÚLTIMA CHANCE
+  reviveHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 6,
+  },
+  reviveTitle: {
+    color: "#EF4444",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+  reviveSubtitle: {
+    fontSize: 13,
+    textAlign: "center",
+    lineHeight: 18,
+    marginBottom: 10,
   },
 });
